@@ -23,6 +23,11 @@ from haproxy_runtime import (  # noqa: E402
     validate_weights,
 )
 
+# The fake emulates the Milestone 2 topology; names are explicit so the test
+# does not depend on the module defaults (which point at Milestone 3's
+# "traffic_policy" backend).
+NAMES = {"backend": "http_backends", "server_a": "backend-a", "server_b": "backend-b"}
+
 HEADER = (
     "1\n# be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state "
     "srv_uweight srv_iweight srv_time_since_last_change\n"
@@ -81,24 +86,24 @@ class ValidationTests(unittest.TestCase):
 class SetWeightsTests(unittest.TestCase):
     def test_apply_and_verify(self):
         fake = FakeHAProxy(90, 10)
-        rt = HAProxyRuntime(transport=fake)
+        rt = HAProxyRuntime(transport=fake, **NAMES)
         res = rt.set_weights(80, 20)
         self.assertEqual(fake.weights, {"backend-a": 80, "backend-b": 20})
         self.assertEqual(res.previous, {"backend-a": 90, "backend-b": 10})
 
     def test_total_never_zero_during_flip(self):
         fake = FakeHAProxy(100, 0)
-        HAProxyRuntime(transport=fake).set_weights(0, 100)
+        HAProxyRuntime(transport=fake, **NAMES).set_weights(0, 100)
         self.assertEqual(fake.history[0], (100, 100))  # increase applied first
         self.assertTrue(all(a + b > 0 for a, b in fake.history))
         fake = FakeHAProxy(0, 100)
-        HAProxyRuntime(transport=fake).set_weights(100, 0)
+        HAProxyRuntime(transport=fake, **NAMES).set_weights(100, 0)
         self.assertTrue(all(a + b > 0 for a, b in fake.history))
 
     def test_invalid_input_sends_nothing(self):
         fake = FakeHAProxy(90, 10)
         with self.assertRaises(WeightValidationError):
-            HAProxyRuntime(transport=fake).set_weights(0, 0)
+            HAProxyRuntime(transport=fake, **NAMES).set_weights(0, 0)
         self.assertEqual(fake.commands, [])
         self.assertEqual(fake.weights, {"backend-a": 90, "backend-b": 10})
 
@@ -106,13 +111,13 @@ class SetWeightsTests(unittest.TestCase):
         # 90:10 -> 50:50: B (increase) applied first, then A fails.
         fake = FakeHAProxy(90, 10, fail_on={"backend-a"})
         with self.assertRaises(RuntimeAPIError) as ctx:
-            HAProxyRuntime(transport=fake).set_weights(50, 50)
+            HAProxyRuntime(transport=fake, **NAMES).set_weights(50, 50)
         self.assertIn("restored", str(ctx.exception))
         self.assertEqual(fake.weights, {"backend-a": 90, "backend-b": 10})
 
     def test_unknown_server_changes_nothing(self):
         fake = FakeHAProxy(90, 10)
-        rt = HAProxyRuntime(transport=fake, server_b="does-not-exist")
+        rt = HAProxyRuntime(transport=fake, backend="http_backends", server_a="backend-a", server_b="does-not-exist")
         with self.assertRaises(RuntimeAPIError):
             rt.set_weights(50, 50)
         self.assertFalse(any(c.startswith("set ") for c in fake.commands))

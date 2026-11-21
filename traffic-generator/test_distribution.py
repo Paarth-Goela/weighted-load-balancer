@@ -55,13 +55,22 @@ from haproxy_runtime import (  # noqa: E402
 
 BACKEND_A = "Backend A"
 BACKEND_B = "Backend B"
+# Milestone 3: Backend A = Apigee OPDK pool, Backend B = Apigee Hybrid pool
+# (simulators report "platform"; older backends only report "backend").
+PLATFORM_LABEL = {"APIGEE_OPDK": BACKEND_A, "APIGEE_HYBRID": BACKEND_B}
+DISPLAY = {BACKEND_A: "Backend A (Apigee OPDK pool)", BACKEND_B: "Backend B (Apigee Hybrid pool)"}
 
 
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
 def one_request(host: str, port: int, path: str, timeout: float) -> str:
-    """Send one GET on a brand-new TCP connection; return the backend label.
+    """Return only the pool/backend label (see request_detail)."""
+    return request_detail(host, port, path, timeout)[0]
+
+
+def request_detail(host: str, port: int, path: str, timeout: float) -> Tuple[str, Optional[str]]:
+    """Send one GET on a brand-new TCP connection; return (backend label, instance).
 
     A new connection + 'Connection: close' per request guarantees every
     request is an independent load-balancing decision by HAProxy (no
@@ -73,18 +82,27 @@ def one_request(host: str, port: int, path: str, timeout: float) -> str:
         resp = conn.getresponse()
         body = resp.read()
         if resp.status != 200:
-            return f"HTTP {resp.status}"
+            return f"HTTP {resp.status}", None
         try:
-            return json.loads(body).get("backend") or "unidentified"
+            data = json.loads(body)
         except ValueError:
-            return "unparseable"
+            return "unparseable", None
+        label = PLATFORM_LABEL.get(data.get("platform")) or data.get("backend") or "unidentified"
+        return label, data.get("instance")
     except Exception as exc:  # network errors are counted, not fatal
-        return f"error: {type(exc).__name__}"
+        return f"error: {type(exc).__name__}", None
     finally:
         conn.close()
 
 
 def run_traffic(url: str, total: int, concurrency: int, timeout: float) -> Tuple[Counter, float]:
+    counts, _, elapsed = run_traffic_detailed(url, total, concurrency, timeout)
+    return counts, elapsed
+
+
+def run_traffic_detailed(url: str, total: int, concurrency: int,
+                         timeout: float) -> Tuple[Counter, Counter, float]:
+    """Returns (requests per backend label, requests per instance, seconds)."""
     parts = urlsplit(url)
     host = parts.hostname or "localhost"
     port = parts.port or 80
@@ -94,9 +112,10 @@ def run_traffic(url: str, total: int, concurrency: int, timeout: float) -> Tuple
 
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        results = pool.map(lambda _: one_request(host, port, path, timeout), range(total))
-        counts = Counter(results)
-    return counts, time.monotonic() - start
+        results = list(pool.map(lambda _: request_detail(host, port, path, timeout), range(total)))
+    counts = Counter(label for label, _ in results)
+    instances = Counter(f"{label} / {inst}" for label, inst in results if inst)
+    return counts, instances, time.monotonic() - start
 
 
 # --------------------------------------------------------------------------
@@ -191,7 +210,7 @@ def main(argv=None) -> int:
         return 2
 
     pct_a, pct_b = percentages(exp_a, exp_b)
-    counts, elapsed = run_traffic(args.url, args.requests, args.concurrency, args.timeout)
+    counts, per_instance, elapsed = run_traffic_detailed(args.url, args.requests, args.concurrency, args.timeout)
 
     n_a = counts.get(BACKEND_A, 0)
     n_b = counts.get(BACKEND_B, 0)
@@ -217,11 +236,16 @@ def main(argv=None) -> int:
         ("Backend B", pct_b, obs_b, n_b, ok_b),
     ):
         print()
-        print(f"{label}:")
+        print(f"{DISPLAY.get(label, label)}:")
         print(f"Expected: {exp:g}%")
         print(f"Observed: {obs:.2f}%")
         print(f"Requests: {n}")
         print(f"Deviation: {obs - exp:+.2f} pp  [{'ok' if ok else 'OUT OF TOLERANCE'}]")
+    if per_instance:
+        print()
+        print("Per instance (instance-level balancing inside each pool):")
+        for k, v in sorted(per_instance.items()):
+            print(f"  {k:<40} {v:>7}  ({100.0 * v / args.requests:.2f}%)")
     if failures:
         print()
         print("Failed / unidentified requests:")

@@ -1,0 +1,29 @@
+{
+  "platforms": [
+    {
+      "name": "Apigee OPDK (simulated)",
+      "platform_type": "APIGEE_OPDK",
+      "description": "LOCAL SIMULATION of an on-premises Apigee OPDK runtime. Not Apigee."
+    },
+    {
+      "name": "Apigee Hybrid (simulated)",
+      "platform_type": "APIGEE_HYBRID",
+      "description": "LOCAL SIMULATION of an Apigee Hybrid runtime on Kubernetes. Not Apigee."
+    }
+  ],
+  "pools": [
+    {"name": "OPDK Pool", "platform_type": "APIGEE_OPDK", "description": "Simulated OPDK Router endpoints"},
+    {"name": "Hybrid Pool", "platform_type": "APIGEE_HYBRID", "description": "Simulated Hybrid ingress endpoints"}
+  ],
+  "instances": [
+    {"name": "opdk-router-1", "pool": "OPDK Pool", "host": "opdk-router-1", "port": 8000, "protocol": "HTTP",
+     "health_check_path": "/healthz", "expected_status_codes": [200]},
+    {"name": "opdk-router-2", "pool": "OPDK Pool", "host": "opdk-router-2", "port": 8000, "protocol": "HTTP",
+     "health_check_path": "/healthz", "expected_status_codes": [200]},
+    {"name": "hybrid-ingress-1", "pool": "Hybrid Pool", "host": "hybrid-ingress-1", "port": 8000, "protocol": "HTTP",
+     "health_check_path": "/healthz", "expected_status_codes": [200]},
+    {"name": "hybrid-ingress-2", "pool": "Hybrid Pool", "host": "hybrid-ingress-2", "port": 8000, "protocol": "HTTP",
+     "health_check_path": "/healthz", "expected_status_codes": [200]}
+  ],
+  "initial_policy": {"opdk_weight": 100, "hybrid_weight": 0, "reason": "baseline: all traffic on OPDK"}
+}

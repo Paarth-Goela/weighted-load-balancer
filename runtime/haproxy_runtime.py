@@ -30,9 +30,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 # --------------------------------------------------------------------------
 DEFAULT_CONTAINER = os.environ.get("HAPROXY_CONTAINER", "haproxy")
 DEFAULT_SOCKET = os.environ.get("HAPROXY_SOCKET", "/var/lib/haproxy/admin.sock")
-DEFAULT_BACKEND = os.environ.get("HAPROXY_BACKEND", "http_backends")
-DEFAULT_SERVER_A = os.environ.get("HAPROXY_SERVER_A", "backend-a")
-DEFAULT_SERVER_B = os.environ.get("HAPROXY_SERVER_B", "backend-b")
+# Milestone 3: pool-level split lives in backend "traffic_policy" with one
+# server per gateway pool ("opdk" = Backend A side, "hybrid" = Backend B side).
+DEFAULT_BACKEND = os.environ.get("HAPROXY_BACKEND", "traffic_policy")
+DEFAULT_SERVER_A = os.environ.get("HAPROXY_SERVER_A", "opdk")
+DEFAULT_SERVER_B = os.environ.get("HAPROXY_SERVER_B", "hybrid")
 
 # HAProxy accepts absolute weights in the range 0..256.
 MIN_WEIGHT = 0
@@ -52,6 +54,26 @@ SCENARIOS: Dict[str, Tuple[int, int]] = {
 
 class RuntimeAPIError(RuntimeError):
     """The Runtime API could not be reached or rejected a command."""
+
+
+class RuntimeAPIConnectionError(RuntimeAPIError):
+    """The Runtime API socket could not be reached (transport failure)."""
+
+
+class WeightUpdateError(RuntimeAPIError):
+    """Applying a weight change failed after HAProxy had been contacted.
+
+    Attributes:
+        rolled_back: True if every server already changed was restored.
+        previous:    weights before the attempt, {server: weight}.
+        cause:       the underlying exception.
+    """
+
+    def __init__(self, message, rolled_back, previous, cause):
+        super().__init__(message)
+        self.rolled_back = rolled_back
+        self.previous = previous
+        self.cause = cause
 
 
 class WeightValidationError(ValueError):
@@ -137,14 +159,14 @@ def docker_exec_transport(
                 timeout=timeout,
             )
         except FileNotFoundError as exc:
-            raise RuntimeAPIError("'docker' executable not found on PATH") from exc
+            raise RuntimeAPIConnectionError("'docker' executable not found on PATH") from exc
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeAPIError(
+            raise RuntimeAPIConnectionError(
                 f"timed out talking to HAProxy runtime socket in '{container}'"
             ) from exc
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout).strip()
-            raise RuntimeAPIError(
+            raise RuntimeAPIConnectionError(
                 f"cannot reach HAProxy runtime socket {socket_path} in container "
                 f"'{container}': {detail or 'exit code ' + str(proc.returncode)}"
             )
@@ -304,7 +326,9 @@ class HAProxyRuntime:
                     f"weight update failed AND rollback failed ({'; '.join(rollback_errors)}); "
                     f"original error: {exc}"
                 )
-            raise RuntimeAPIError(msg) from exc
+            raise WeightUpdateError(
+                msg, rolled_back=not rollback_errors, previous=previous, cause=exc
+            ) from exc
 
         return WeightChangeResult(previous=previous, applied=target)
 

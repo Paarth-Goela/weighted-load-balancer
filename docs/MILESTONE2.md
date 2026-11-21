@@ -1,5 +1,13 @@
 # Milestone 2 — Weighted Traffic Distribution
 
+> **Updated by Milestone 3.** The HAProxy backend `http_backends`
+> (`backend-a`/`backend-b`) is now the two-tier `traffic_policy` backend
+> (`opdk` = A, `hybrid` = B) in front of the `apigee_opdk_pool` and
+> `apigee_hybrid_pool` backends. `set_weights.py` and `test_distribution.py`
+> use the new names by default. The Runtime API socket path is unchanged.
+> Weight changes are now normally made through the Traffic Management API
+> (see `architecture.md`, `api-reference.md`, `local-simulation.md`).
+
 Extends the Milestone 1 HAProxy Layer 7 load balancer with:
 
 - static weighted routing (weights in `haproxy.cfg`)

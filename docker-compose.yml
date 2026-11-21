@@ -1,37 +1,136 @@
+# Data plane:    clients -> haproxy:8080 -> {apigee_opdk_pool | apigee_hybrid_pool} -> gateway instances
+# Control plane: traffic-manager:9000 -> HAProxy Runtime API (private Unix socket, shared volume)
+#
+# backend-a / backend-b and their *-2 siblings are LOCAL SIMULATORS of Apigee
+# runtime endpoints. They are NOT Apigee. To use real endpoints, register them
+# through the API or point BOOTSTRAP_FILE at your own bootstrap JSON.
+
+x-opdk-sim: &opdk-sim
+  build: ./backend-a
+  expose: ["8000"]
+  networks: [load-balancer]
+  environment: &opdk-env
+    SIM_PLATFORM: APIGEE_OPDK
+    SIM_ROLE: OPDK Router (simulated)
+    BACKEND_LABEL: Backend A
+    SIM_HEALTH_PATH: /healthz
+
+x-hybrid-sim: &hybrid-sim
+  build: ./backend-b
+  expose: ["8000"]
+  networks: [load-balancer]
+  environment: &hybrid-env
+    SIM_PLATFORM: APIGEE_HYBRID
+    SIM_ROLE: Hybrid Ingress (simulated)
+    BACKEND_LABEL: Backend B
+    SIM_HEALTH_PATH: /healthz
+
 services:
-  backend-a:
-    build: ./backend-a
+  # ---------------------------------------------------- OPDK simulators
+  backend-a:                       # = opdk-router-1 (Milestone 1/2 name kept)
+    <<: *opdk-sim
     container_name: backend-a
-    expose:
-      - "8000"
-    ports:
-      - "8001:8000"
+    environment:
+      <<: *opdk-env
+      SIM_INSTANCE: opdk-router-1
+    ports: ["8001:8000"]
     networks:
-      - load-balancer
+      load-balancer:
+        aliases: [opdk-router-1]
 
-  backend-b:
-    build: ./backend-b
+  opdk-router-2:
+    <<: *opdk-sim
+    container_name: opdk-router-2
+    environment:
+      <<: *opdk-env
+      SIM_INSTANCE: opdk-router-2
+    ports: ["127.0.0.1:8003:8000"]
+
+  # -------------------------------------------------- Hybrid simulators
+  backend-b:                       # = hybrid-ingress-1 (Milestone 1/2 name kept)
+    <<: *hybrid-sim
     container_name: backend-b
-    expose:
-      - "8000"
-    ports:
-      - "8002:8000"
+    environment:
+      <<: *hybrid-env
+      SIM_INSTANCE: hybrid-ingress-1
+    ports: ["8002:8000"]
     networks:
-      - load-balancer
+      load-balancer:
+        aliases: [hybrid-ingress-1]
 
+  hybrid-ingress-2:
+    <<: *hybrid-sim
+    container_name: hybrid-ingress-2
+    environment:
+      <<: *hybrid-env
+      SIM_INSTANCE: hybrid-ingress-2
+    ports: ["127.0.0.1:8004:8000"]
+
+  # ------------------------------------------------------------ HAProxy
   haproxy:
     image: haproxy:3.0-alpine
     container_name: haproxy
     ports:
       - "8080:8080"
+    environment:
+      # HAProxy-native health-check path per pool (fast safety net; the
+      # traffic-manager monitor does the per-instance readiness checks).
+      OPDK_NATIVE_CHECK_PATH: ${OPDK_NATIVE_CHECK_PATH:-/healthz}
+      HYBRID_NATIVE_CHECK_PATH: ${HYBRID_NATIVE_CHECK_PATH:-/healthz}
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - haproxy-runtime:/var/lib/haproxy          # holds admin.sock (mode 600)
     depends_on:
       - backend-a
       - backend-b
+      - opdk-router-2
+      - hybrid-ingress-2
     networks:
       - load-balancer
+
+  # ------------------------------------------- Traffic Management API
+  traffic-manager:
+    build:
+      context: .
+      dockerfile: traffic-manager/Dockerfile
+      target: runtime
+    container_name: traffic-manager
+    ports:
+      - "127.0.0.1:9000:9000"                     # admin API: localhost only
+    environment:
+      TRAFFIC_API_TOKEN: ${TRAFFIC_API_TOKEN:-}   # required; service refuses to start without it
+      HAPROXY_RUNTIME_SOCKET: /run/haproxy-runtime/admin.sock
+      DATABASE_PATH: /app/data/traffic-manager.db
+      BOOTSTRAP_FILE: ${BOOTSTRAP_FILE:-/app/bootstrap/bootstrap.simulation.json}
+      HEALTH_CHECK_INTERVAL_SECONDS: ${HEALTH_CHECK_INTERVAL_SECONDS:-2}
+      HEALTH_CHECK_TIMEOUT_SECONDS: ${HEALTH_CHECK_TIMEOUT_SECONDS:-2}
+      HEALTH_FAILURE_THRESHOLD: ${HEALTH_FAILURE_THRESHOLD:-3}
+      HEALTH_RECOVERY_THRESHOLD: ${HEALTH_RECOVERY_THRESHOLD:-2}
+      HEALTH_RECOVERY_HOLD_SECONDS: ${HEALTH_RECOVERY_HOLD_SECONDS:-0}
+      DRAIN_TIMEOUT_SECONDS: ${DRAIN_TIMEOUT_SECONDS:-10}
+      HAPROXY_CA_FILE: ${HAPROXY_CA_FILE:-@system-ca}
+      METRICS_SOCKET: /run/haproxy-runtime/metrics.sock
+      METRICS_RETENTION_SECONDS: ${METRICS_RETENTION_SECONDS:-900}
+    volumes:
+      - haproxy-runtime:/run/haproxy-runtime      # Runtime API socket + metrics socket (created here)
+      - tm-data:/app/data                         # SQLite database
+      - ./config:/app/bootstrap:ro                # bootstrap JSON
+    depends_on:
+      - haproxy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/livez', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - load-balancer                             # needed to probe gateway instances
 
 networks:
   load-balancer:
     driver: bridge
+
+volumes:
+  haproxy-runtime:
+  tm-data:
