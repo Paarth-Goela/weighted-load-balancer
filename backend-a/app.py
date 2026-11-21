@@ -20,17 +20,25 @@ gateway serves API traffic correctly):
   GET  /__sim/health                     -> {"ready": true|false}
   POST /__sim/health  {"ready": false}   -> readiness path returns 503,
                                             normal API paths keep answering 200
-  GET  /__sim/faults                     -> {"error_rate": 0.0, "latency_ms": 0}
-  POST /__sim/faults  {"error_rate": 0.3, "latency_ms": 250}
+  GET  /__sim/faults                     -> current faults
+  POST /__sim/faults  {"error_rate": 0.3, "latency_ms": 250,
+                       "latency_jitter_ms": 100, "drop_rate": 0.05}
                                          -> normal API paths fail with HTTP 500
-                                            for ~30% of requests and are delayed
-                                            250 ms. Readiness is NOT affected.
+                                            for ~30% of requests, are delayed
+                                            250 ms + uniform 0..100 ms, and ~5%
+                                            of connections are reset (TCP RST)
+                                            without any response - the closest
+                                            application-level stand-in for packet
+                                            loss / a crashing worker. Omitted
+                                            fields are reset to 0. Readiness is
+                                            NOT affected by any of these.
 """
 
 import json
 import os
 import random
 import socket
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,7 +55,7 @@ SIM_HEALTH_PATH = os.environ.get("SIM_HEALTH_PATH", "/healthz")
 
 _state_lock = threading.Lock()
 _ready = True
-_faults = {"error_rate": 0.0, "latency_ms": 0}
+_faults = {"error_rate": 0.0, "latency_ms": 0, "latency_jitter_ms": 0, "drop_rate": 0.0}
 
 
 class SimulatorHandler(BaseHTTPRequestHandler):
@@ -83,8 +91,13 @@ class SimulatorHandler(BaseHTTPRequestHandler):
         elif path == SIM_HEALTH_PATH:
             self._send(200 if ready else 503, {"ready": ready, "path": path, **self._identity()})
         else:
-            if faults["latency_ms"]:
-                time.sleep(faults["latency_ms"] / 1000.0)
+            delay = faults["latency_ms"] + (random.uniform(0, faults["latency_jitter_ms"])
+                                            if faults["latency_jitter_ms"] else 0)
+            if delay:
+                time.sleep(delay / 1000.0)
+            if faults["drop_rate"] and random.random() < faults["drop_rate"]:
+                self._reset_connection()
+                return
             if faults["error_rate"] and random.random() < faults["error_rate"]:
                 self._send(500, {"error": "simulated gateway error", **self._identity()})
                 return
@@ -93,6 +106,15 @@ class SimulatorHandler(BaseHTTPRequestHandler):
                 **self._identity(),
                 "path": self.path,
             })
+
+    def _reset_connection(self):
+        """Abort with TCP RST and no HTTP response (SO_LINGER 0, then close)."""
+        self.close_connection = True
+        try:
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            self.connection.close()
+        except OSError:
+            pass
 
     def do_POST(self):
         global _ready
@@ -123,13 +145,17 @@ class SimulatorHandler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length) or b"{}")
             rate = float(data.get("error_rate", 0.0))
             latency = int(data.get("latency_ms", 0))
-            if not (0.0 <= rate <= 1.0 and 0 <= latency <= 10000):
+            jitter = int(data.get("latency_jitter_ms", 0))
+            drop = float(data.get("drop_rate", 0.0))
+            if not (0.0 <= rate <= 1.0 and 0 <= latency <= 10000 and 0 <= jitter <= 10000
+                    and 0.0 <= drop <= 1.0):
                 raise ValueError
-        except (ValueError, TypeError):
-            self._send(400, {"error": 'body must be {"error_rate": 0..1, "latency_ms": 0..10000}'})
+        except (ValueError, TypeError, AttributeError):
+            self._send(400, {"error": 'body must be {"error_rate": 0..1, "latency_ms": 0..10000, '
+                                      '"latency_jitter_ms": 0..10000, "drop_rate": 0..1}'})
             return
         with _state_lock:
-            _faults.update(error_rate=rate, latency_ms=latency)
+            _faults.update(error_rate=rate, latency_ms=latency, latency_jitter_ms=jitter, drop_rate=drop)
         print(f"[{SIM_INSTANCE}] simulated faults set to {_faults}", flush=True)
         self._send(200, {**_faults, **self._identity()})
 

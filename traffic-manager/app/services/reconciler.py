@@ -59,6 +59,12 @@ class Reconciler:
         self.clock = clock
         self.pool_hold_since: Optional[float] = None
         self._ready_since: Optional[float] = None
+        # Cumulative counters for the Prometheus exporter.
+        self.runs_total = 0
+        self.restarts_detected_total = 0
+        self.unreachable_total = 0
+        self.errors_total = 0
+        self.actions_total = 0
 
     def reconcile(self) -> dict:
         summary: dict = {"haproxy": "reachable", "actions": [], "errors": []}
@@ -80,6 +86,11 @@ class Reconciler:
             summary["haproxy"] = "unreachable"
         except RuntimeAPIError as exc:
             summary["errors"].append(str(exc))
+        self.runs_total += 1
+        self.restarts_detected_total += int(bool(summary.get("haproxy_restarted")))
+        self.unreachable_total += int(summary["haproxy"] == "unreachable")
+        self.errors_total += len(summary["errors"])
+        self.actions_total += len(summary["actions"])
         self.last_result = summary
         return summary
 

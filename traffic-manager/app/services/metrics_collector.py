@@ -40,6 +40,22 @@ log = logging.getLogger(__name__)
 
 MAX_EVENTS = 300_000          # per pool; bounds memory (~30 MB worst case)
 BACKEND_TO_TYPE = {v: k for k, v in POOL_BACKEND.items()}
+# Prometheus histogram upper bounds (seconds) for gateway response time (Tr).
+LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+
+
+def status_class(status: int, tr: int) -> str:
+    """'1xx'..'5xx' by HTTP status, or 'none' when no status was sent (-1).
+
+    HAProxy-generated errors (502/503/504 when an instance fails) are 5xx with
+    Tr = -1; they count as errors either way (see is_error)."""
+    if status < 100:
+        return "none"
+    return f"{min(status // 100, 5)}xx"
+
+
+def is_error(status: int, tr: int) -> bool:
+    return status >= 500 or status < 0 or tr < 0
 
 
 def p95(values: list[float]) -> Optional[float]:
@@ -67,6 +83,13 @@ class MetricsCollector:
         self.last_event_at: Optional[float] = None
         self.listening = False
         self.error: Optional[str] = None
+        # Cumulative totals since process start (Prometheus counters). Unlike the
+        # windows above they are never pruned.
+        self.requests_total: dict[tuple[str, str, str], int] = {}   # (backend, server, class) -> n
+        self.errors_total: dict[str, int] = {b: 0 for b in POOL_BACKEND.values()}
+        self.latency_hist: dict[str, list[int]] = {b: [0] * len(LATENCY_BUCKETS) for b in POOL_BACKEND.values()}
+        self.latency_sum: dict[str, float] = {b: 0.0 for b in POOL_BACKEND.values()}
+        self.latency_count: dict[str, int] = {b: 0 for b in POOL_BACKEND.values()}
 
     # ----------------------------------------------------------- ingestion
     def ingest(self, line: str, ts: Optional[float] = None) -> bool:
@@ -81,7 +104,21 @@ class MetricsCollector:
             return False
         ts = self.clock() if ts is None else ts
         with self._lock:
-            self._events[parts[1]].append((ts, parts[2], status, tr, tt))
+            backend, server = parts[1], parts[2]
+            self._events[backend].append((ts, server, status, tr, tt))
+            key = (backend, server, status_class(status, tr))
+            self.requests_total[key] = self.requests_total.get(key, 0) + 1
+            if is_error(status, tr):
+                self.errors_total[backend] += 1
+            if tr >= 0:
+                sec = tr / 1000.0
+                self.latency_sum[backend] += sec
+                self.latency_count[backend] += 1
+                hist = self.latency_hist[backend]
+                for i, bound in enumerate(LATENCY_BUCKETS):
+                    if sec <= bound:
+                        hist[i] += 1          # stored non-cumulative; exporter accumulates
+                        break
             self.received += 1
             self.last_event_at = ts
             self._prune(ts)
@@ -101,7 +138,7 @@ class MetricsCollector:
     @staticmethod
     def summarize(events: list[tuple], seconds: float) -> dict:
         n = len(events)
-        errors = sum(1 for e in events if e[2] >= 500 or e[2] < 0 or e[3] < 0)
+        errors = sum(1 for e in events if is_error(e[2], e[3]))
         lat = [e[3] for e in events if e[3] >= 0]
         servers: dict[str, int] = {}
         for e in events:
@@ -138,6 +175,20 @@ class MetricsCollector:
             out.append(row)
             t += bucket
         return out
+
+    def totals(self) -> dict:
+        """Consistent copy of the cumulative counters (for the Prometheus exporter)."""
+        with self._lock:
+            return {
+                "requests": dict(self.requests_total),
+                "errors": dict(self.errors_total),
+                "hist": {b: list(v) for b, v in self.latency_hist.items()},
+                "sum": dict(self.latency_sum),
+                "count": dict(self.latency_count),
+                "received": self.received,
+                "malformed": self.malformed,
+                "last_event_at": self.last_event_at,
+            }
 
     def status(self) -> dict:
         now = self.clock()

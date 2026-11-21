@@ -20,10 +20,13 @@ from typing import Callable, Optional
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import gateways, health, instances, pools, traffic
+from pathlib import Path
+
+from app.api import gateways, health, instances, migrations, observability, pools, traffic
 from app.bootstrap import run_bootstrap
 from app.database.connection import Database
 from app.errors import ServiceError
@@ -34,6 +37,9 @@ from app.services.control import ControlLock, Resolver
 from app.services.gateway_manager import GatewayManager
 from app.services.haproxy_client import HAProxyClient, unix_socket_transport
 from app.services.health_monitor import HealthMonitor, Prober
+from app.services.metrics_collector import MetricsCollector
+from app.services.migration_manager import MigrationManager
+from app.services.migration_scheduler import MigrationScheduler
 from app.services.reconciler import Reconciler
 from app.services.traffic_manager import TrafficManager
 from app.settings import Settings
@@ -47,6 +53,7 @@ instance readiness, and shifts traffic between the pools without restarting HAPr
 
 * **Auth:** every `/api/v1/*` endpoint needs `Authorization: Bearer <TRAFFIC_API_TOKEN>`.
   A missing token returns **401**; a wrong token returns **403**. Only `/livez` and these docs are public.
+  `GET /metrics` (Prometheus) also accepts the read-only `METRICS_TOKEN`, which works nowhere else.
 * **Traffic policy:** `opdk_weight` + `hybrid_weight` = 100 (integers). This pool-level split is
   separate from instance weights, which only spread a pool's share across its own instances.
 * **Safety:** changes are serialized, checked for pool eligibility, applied in a safe order,
@@ -69,6 +76,7 @@ class ControlLoop:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self.failures_total = 0
 
     @property
     def running(self) -> bool:
@@ -83,6 +91,7 @@ class ControlLoop:
                 try:
                     self.monitor.run_cycle()
                 except Exception:
+                    self.failures_total += 1
                     log.exception("control loop cycle failed")
                 self._wake.wait(self.interval)
                 self._wake.clear()
@@ -102,6 +111,8 @@ def create_app(
     transport: Optional[Callable[[str], str]] = None,
     resolver: Optional[Resolver] = None,
     prober: Optional[Prober] = None,
+    metrics: Optional[MetricsCollector] = None,
+    clock: Optional[Callable] = None,
 ) -> FastAPI:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -130,6 +141,10 @@ def create_app(
         recovery_threshold=settings.recovery_threshold,
         recovery_hold_seconds=settings.recovery_hold_seconds,
     )
+    collector = metrics or MetricsCollector(settings.metrics_socket, settings.metrics_retention_seconds)
+    migration_mgr = MigrationManager(db, tm, gw, audit, collector, schedule_grace_seconds=settings.schedule_grace_seconds,
+                                     **({"clock": clock} if clock else {}))
+    scheduler = MigrationScheduler(migration_mgr, settings.migration_tick_seconds) if settings.run_background else None
     control_loop = ControlLoop(monitor, settings.health_interval) if settings.run_background else None
     loop_ref["loop"] = control_loop
 
@@ -140,11 +155,21 @@ def create_app(
         app.state.bootstrap_result = run_bootstrap(settings.bootstrap_file, gw, tm, audit)
         log.info("bootstrap: %s", app.state.bootstrap_result)
         log.info("startup reconcile: %s", rec.reconcile())  # restore runtime state from SQLite
+        paused = migration_mgr.recover_after_restart()
+        if paused:
+            log.warning("migrations paused after restart: %s", paused)
+        if settings.run_background:
+            collector.start()
         if control_loop:
             control_loop.start()
+        if scheduler:
+            scheduler.start()
         yield
+        if scheduler:
+            scheduler.stop()
         if control_loop:
             control_loop.stop()
+        collector.stop()
         db.close()
 
     app = FastAPI(title="Apigee OPDK / Hybrid Traffic Management API", version="3.0.0",
@@ -153,6 +178,8 @@ def create_app(
     st.settings, st.db, st.client, st.audit, st.lock = settings, db, client, audit, lock
     st.gateways, st.traffic, st.reconciler, st.monitor = gw, tm, rec, monitor
     st.control_loop, st.bootstrap_result = control_loop, None
+    st.metrics, st.migrations, st.migration_scheduler = collector, migration_mgr, scheduler
+    st.app_version = app.version
 
     @app.exception_handler(ServiceError)
     async def service_error(_: Request, exc: ServiceError):
@@ -187,4 +214,29 @@ def create_app(
     app.include_router(pools.router)
     app.include_router(instances.router)
     app.include_router(traffic.router)
+    app.include_router(migrations.router)
+    app.include_router(observability.router)
+
+    # ---------------------------------------------------- operations console
+    # Static single-page console. It holds no data and no secrets: every value
+    # is fetched from the authenticated API with the operator's token.
+    console_dir = Path(__file__).parent / "console"
+    app.mount("/console", StaticFiles(directory=console_dir, html=True), name="console")
+
+    @app.get("/", include_in_schema=False)
+    def root():
+        return RedirectResponse("/console/")
+
+    @app.middleware("http")
+    async def console_headers(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/console"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     return app

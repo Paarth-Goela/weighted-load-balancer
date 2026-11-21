@@ -36,6 +36,23 @@ def require_admin(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid token")
 
 
+def require_metrics_reader(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> None:
+    """GET /metrics: the admin token or the read-only METRICS_TOKEN (401/403 as above)."""
+    if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing bearer token",
+                            headers={"WWW-Authenticate": "Bearer"})
+    st = request.app.state.settings
+    presented = credentials.credentials.encode()
+    ok = hmac.compare_digest(presented, st.api_token.encode())
+    if st.metrics_token:
+        ok = hmac.compare_digest(presented, st.metrics_token.encode()) or ok
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid token")
+
+
 def actor(request: Request) -> str:
     """Audit 'source': client address plus optional (unverified) X-Actor."""
     who = f"api:{request.client.host}" if request.client else "api"

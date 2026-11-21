@@ -6,6 +6,7 @@ import json
 import sys
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +23,7 @@ from app.main import create_app  # noqa: E402
 from app.services.control import ResolutionError  # noqa: E402
 from app.services.haproxy_client import RuntimeAPIConnectionError  # noqa: E402
 from app.services.health_monitor import ProbeResult  # noqa: E402
+from app.services.metrics_collector import MetricsCollector  # noqa: E402
 from app.settings import Settings  # noqa: E402
 
 TOKEN = "unit-test-token-0123456789abcdef"
@@ -203,13 +205,42 @@ class FakeProber:
         return ProbeResult(True, 200, 1.0, None, "172.30.0.1")
 
 
+class FakeClock:
+    """Shared by the migration engine and the metrics collector."""
+
+    def __init__(self) -> None:
+        self.t = datetime(2026, 11, 22, 9, 0, 0, tzinfo=timezone.utc)
+
+    def now(self) -> datetime:
+        return self.t
+
+    def ts(self) -> float:
+        return self.t.timestamp()
+
+    def advance(self, seconds: float) -> None:
+        self.t += timedelta(seconds=seconds)
+
+
 @dataclass
 class Env:
     tmp: Path
     fake: FakeHAProxy = field(default_factory=FakeHAProxy)
     resolver: FakeResolver = field(default_factory=FakeResolver)
     prober: FakeProber = field(default_factory=FakeProber)
+    clock: FakeClock = field(default_factory=FakeClock)
     clients: list = field(default_factory=list)
+    metrics: MetricsCollector = None
+
+    def __post_init__(self) -> None:
+        self.metrics = MetricsCollector(None, retention_seconds=3600, clock=self.clock.ts)
+
+    def traffic(self, pool: str, n: int, errors: int = 0, latency_ms: int = 20) -> None:
+        """Feed n HAProxy log events for 'opdk'/'hybrid' at (now - 1s), inside the current window."""
+        backend = {"opdk": "apigee_opdk_pool", "hybrid": "apigee_hybrid_pool"}[pool]
+        ts = self.clock.ts() - 1
+        for i in range(n):
+            status = 500 if i < errors else 200
+            self.metrics.ingest(f"M {backend} {pool}-x {status} {latency_ms} {latency_ms + 1}", ts)
 
     def settings(self, **kw) -> Settings:
         base = dict(api_token=TOKEN, database_path=self.tmp / "tm.db", run_background=False,
@@ -220,7 +251,8 @@ class Env:
 
     def client(self, **kw) -> TestClient:
         """A fresh 'process start' of the management API on the same database."""
-        app = create_app(self.settings(**kw), transport=self.fake, resolver=self.resolver, prober=self.prober)
+        app = create_app(self.settings(**kw), transport=self.fake, resolver=self.resolver, prober=self.prober,
+                         metrics=self.metrics, clock=self.clock.now)
         c = TestClient(app)
         c.__enter__()
         self.clients.append(c)

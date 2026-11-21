@@ -40,6 +40,16 @@ class Settings:
     pool_release_settle_seconds: float = 1.5   # > selector check interval (1s)
     pool_release_timeout_seconds: float = 20.0  # release anyway after this long
 
+    # Traffic shift management
+    metrics_socket: Optional[str] = None       # HAProxy per-request log stream (Unix DGRAM)
+    metrics_retention_seconds: float = 900.0
+    migration_tick_seconds: float = 1.0
+    schedule_grace_seconds: float = 60.0       # scheduled stage later than this -> not run, migration pauses
+
+    # Prometheus scrape token (read-only: valid ONLY for GET /metrics). Optional;
+    # the admin token is also accepted there.
+    metrics_token: Optional[str] = field(default=None, repr=False)
+
     run_background: bool = True           # start the control loop (off in unit tests)
 
     def __post_init__(self) -> None:
@@ -50,6 +60,10 @@ class Settings:
             )
         if self.failure_threshold < 1 or self.recovery_threshold < 1:
             raise SettingsError("health thresholds must be >= 1")
+        if self.metrics_token is not None and (
+                len(self.metrics_token) < MIN_TOKEN_LENGTH or self.metrics_token == self.api_token):
+            raise SettingsError(
+                f"METRICS_TOKEN must be at least {MIN_TOKEN_LENGTH} characters and differ from TRAFFIC_API_TOKEN")
         if self.health_interval <= 0 or self.health_timeout <= 0:
             raise SettingsError("health interval/timeout must be > 0")
 
@@ -79,4 +93,9 @@ class Settings:
             haproxy_ca_file=e.get("HAPROXY_CA_FILE", cls.haproxy_ca_file),
             pool_release_settle_seconds=float(e.get("POOL_RELEASE_SETTLE_SECONDS", cls.pool_release_settle_seconds)),
             pool_release_timeout_seconds=float(e.get("POOL_RELEASE_TIMEOUT_SECONDS", cls.pool_release_timeout_seconds)),
+            metrics_socket=opt("METRICS_SOCKET"),
+            metrics_retention_seconds=float(e.get("METRICS_RETENTION_SECONDS", cls.metrics_retention_seconds)),
+            migration_tick_seconds=float(e.get("MIGRATION_TICK_SECONDS", cls.migration_tick_seconds)),
+            schedule_grace_seconds=float(e.get("SCHEDULE_GRACE_SECONDS", cls.schedule_grace_seconds)),
+            metrics_token=opt("METRICS_TOKEN"),
         )

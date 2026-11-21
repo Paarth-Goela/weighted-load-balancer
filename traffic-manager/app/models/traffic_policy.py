@@ -88,6 +88,10 @@ class TrafficChangeResult(TrafficConfig):
     verified: bool = True
 
 
+class EmergencyShiftResult(TrafficChangeResult):
+    cancelled_migration: Optional[int] = Field(None, description="Active migration cancelled by this shift, if any.")
+
+
 class AuditEntry(BaseModel):
     id: int
     timestamp: datetime

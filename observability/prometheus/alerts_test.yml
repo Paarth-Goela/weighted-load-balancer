@@ -1,0 +1,160 @@
+# promtool unit tests for alerts.yml:
+#   docker run --rm --entrypoint promtool -v "$PWD/observability/prometheus:/cfg:ro" \
+#     prom/prometheus:v3.5.0 test rules /cfg/alerts_test.yml
+rule_files:
+  - alerts.yml
+evaluation_interval: 15s
+
+tests:
+  # Hybrid serves 10 req/s with 30% errors; OPDK clean. Only Hybrid alerts.
+  - interval: 15s
+    input_series:
+      - series: 'tm_gateway_requests_total{platform="APIGEE_HYBRID", instance="h1", code_class="2xx"}'
+        values: '0+105x10'
+      - series: 'tm_gateway_requests_total{platform="APIGEE_HYBRID", instance="h1", code_class="5xx"}'
+        values: '0+45x10'
+      - series: 'tm_gateway_errors_total{platform="APIGEE_HYBRID"}'
+        values: '0+45x10'
+      - series: 'tm_gateway_requests_total{platform="APIGEE_OPDK", instance="o1", code_class="2xx"}'
+        values: '0+150x10'
+      - series: 'tm_gateway_errors_total{platform="APIGEE_OPDK"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m30s
+        alertname: GatewayPoolHighErrorRate
+        exp_alerts:
+          - exp_labels: {severity: critical, platform: APIGEE_HYBRID}
+            exp_annotations:
+              summary: "APIGEE_HYBRID error rate above 1%"
+              description: "30% of requests to APIGEE_HYBRID failed (5xx or no response) over 1m."
+
+  # Low volume (0.1 req/s) with errors does not page.
+  - interval: 15s
+    input_series:
+      - series: 'tm_gateway_requests_total{platform="APIGEE_HYBRID", instance="h1", code_class="5xx"}'
+        values: '0+1.5x10'
+      - series: 'tm_gateway_errors_total{platform="APIGEE_HYBRID"}'
+        values: '0+1.5x10'
+    alert_rule_test:
+      - eval_time: 2m30s
+        alertname: GatewayPoolHighErrorRate
+        exp_alerts: []
+
+  # Hybrid has 30% assigned and no routable instance -> critical; OPDK fine.
+  - interval: 15s
+    input_series:
+      - series: 'tm_pool_routable_instances{platform="APIGEE_HYBRID"}'
+        values: '0x4'
+      - series: 'tm_pool_routable_instances{platform="APIGEE_OPDK"}'
+        values: '2x4'
+      - series: 'tm_traffic_policy_percent{platform="APIGEE_HYBRID", source="configured"}'
+        values: '30x4'
+      - series: 'tm_traffic_policy_percent{platform="APIGEE_OPDK", source="configured"}'
+        values: '70x4'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: GatewayPoolDownWithTrafficAssigned
+        exp_alerts:
+          - exp_labels: {severity: critical, platform: APIGEE_HYBRID}
+            exp_annotations:
+              summary: "APIGEE_HYBRID has traffic assigned but no routable instance"
+              description: "HAProxy is failing its share over to the other pool. Check capacity there."
+
+  # A pool with 0% assigned and no instances is not an incident.
+  - interval: 15s
+    input_series:
+      - series: 'tm_pool_routable_instances{platform="APIGEE_HYBRID"}'
+        values: '0x4'
+      - series: 'tm_traffic_policy_percent{platform="APIGEE_HYBRID", source="configured"}'
+        values: '0x4'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: GatewayPoolDownWithTrafficAssigned
+        exp_alerts: []
+
+  # Policy drift and an unhealthy enabled instance.
+  - interval: 15s
+    input_series:
+      - series: 'tm_traffic_policy_in_sync'
+        values: '1 0 0 0 0 0 0'
+      - series: 'tm_instance_enabled{platform="APIGEE_HYBRID", instance="hybrid-ingress-1"}'
+        values: '1x6'
+      - series: 'tm_instance_healthy{platform="APIGEE_HYBRID", instance="hybrid-ingress-1"}'
+        values: '1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m30s
+        alertname: TrafficPolicyOutOfSync
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "HAProxy weights differ from the active traffic policy"
+              description: "Someone changed HAProxy weights outside the management API, or an apply failed."
+      - eval_time: 1m30s
+        alertname: GatewayInstanceUnhealthy
+        exp_alerts:
+          - exp_labels: {severity: warning, platform: APIGEE_HYBRID, instance: hybrid-ingress-1}
+            exp_annotations:
+              summary: "Instance hybrid-ingress-1 (APIGEE_HYBRID) is not healthy"
+              description: "It has been removed from routing (MAINT) until its readiness probe recovers."
+
+  # p95 above 1s: 10 req/s, 90% fast (<=50ms) and 10% at 2.5s -> p95 lands in the 1..2.5s bucket.
+  - interval: 15s
+    input_series:
+      - series: 'tm_gateway_response_seconds_bucket{platform="APIGEE_HYBRID", le="0.05"}'
+        values: '0+135x30'
+      - series: 'tm_gateway_response_seconds_bucket{platform="APIGEE_HYBRID", le="1"}'
+        values: '0+135x30'
+      - series: 'tm_gateway_response_seconds_bucket{platform="APIGEE_HYBRID", le="2.5"}'
+        values: '0+150x30'
+      - series: 'tm_gateway_response_seconds_bucket{platform="APIGEE_HYBRID", le="+Inf"}'
+        values: '0+150x30'
+      - series: 'tm_gateway_response_seconds_count{platform="APIGEE_HYBRID"}'
+        values: '0+150x30'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GatewayPoolHighLatencyP95
+        exp_alerts:
+          - exp_labels: {severity: warning, platform: APIGEE_HYBRID}
+            exp_annotations:
+              summary: "APIGEE_HYBRID p95 response time above 1s"
+              description: "Estimated p95 (histogram) is 1.75s over 5m."
+
+  # A stage failed and the migration rolled back within the last 10 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'tm_migration_stages{status="FAILED"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 1 1'
+      - series: 'tm_migrations{status="ROLLED_BACK"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 1 1'
+      - series: 'tm_migrations{status="FAILED"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: MigrationSafetyViolation
+        exp_alerts:
+          - exp_labels: {severity: warning, status: FAILED}
+            exp_annotations:
+              summary: "A traffic-migration stage failed its safety checks"
+              description: "See the migration history in the console or GET /api/v1/migrations."
+      - eval_time: 12m
+        alertname: MigrationRolledBackOrFailed
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "A traffic migration was rolled back or failed"
+
+  # Control loop stopped reporting.
+  - interval: 15s
+    input_series:
+      - series: 'tm_control_loop_running'
+        values: '1x8'
+      - series: 'tm_control_loop_last_cycle_timestamp_seconds'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ControlLoopStalled
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Health/reconcile loop is not running"
+              description: "No probe/reconcile cycle finished in 30s: instance health is not being enforced."

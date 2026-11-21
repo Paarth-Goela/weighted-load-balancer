@@ -1,0 +1,18 @@
+# Prometheus for the local traffic layer (docker compose --profile observability).
+# Scrapes the traffic-manager's /metrics with the read-only METRICS_TOKEN,
+# mounted as a Compose secret (never written into this file).
+global:
+  scrape_interval: 5s          # local simulation; 15-30s is typical in production
+  evaluation_interval: 5s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: traffic-manager
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token
+    static_configs:
+      - targets: ["traffic-manager:9000"]

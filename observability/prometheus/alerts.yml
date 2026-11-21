@@ -1,0 +1,139 @@
+# Alert rules for the OPDK / Hybrid traffic layer.
+#
+# Thresholds are deliberately written as literals next to each rule so they
+# are easy to tune per environment; the values below suit the local
+# simulation and are starting points, not production SLOs. Rules only fire in
+# Prometheus (see the Alerts page); routing to on-call (Alertmanager) is not
+# configured here.
+#
+# Error = HTTP 5xx (including HAProxy-generated 502/503/504) or no response.
+groups:
+  - name: traffic-layer-availability
+    rules:
+      - alert: TrafficManagerScrapeFailing
+        expr: up{job="traffic-manager"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "traffic-manager /metrics cannot be scraped"
+          description: "Prometheus has not scraped the traffic-manager for 1m (service down, auth or network)."
+
+      - alert: HAProxyRuntimeUnreachable
+        expr: tm_haproxy_up == 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "HAProxy Runtime API unreachable"
+          description: "The control plane cannot read or change routing. Data plane may still be serving."
+
+      - alert: ControlLoopStalled
+        expr: tm_control_loop_running == 0 or (time() - tm_control_loop_last_cycle_timestamp_seconds) > 30
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Health/reconcile loop is not running"
+          description: "No probe/reconcile cycle finished in 30s: instance health is not being enforced."
+
+      - alert: TrafficPolicyOutOfSync
+        expr: tm_traffic_policy_in_sync == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "HAProxy weights differ from the active traffic policy"
+          description: "Someone changed HAProxy weights outside the management API, or an apply failed."
+
+      - alert: HAProxyRestartDetected
+        expr: increase(tm_haproxy_restarts_detected_total[10m]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "HAProxy restarted; runtime state was rebuilt by the reconciler"
+
+      - alert: MetricsStreamDown
+        expr: tm_metrics_stream_listening == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Per-request metric stream is not listening"
+          description: "Error-rate/latency gates of migrations cannot be evaluated without it."
+
+  - name: gateway-pools
+    rules:
+      - alert: GatewayPoolHighErrorRate
+        # > 1% errors over 1m, only when the pool served at least 1 req/s (avoids noise at low volume).
+        expr: |
+          (sum by (platform) (rate(tm_gateway_errors_total[1m]))
+            / sum by (platform) (rate(tm_gateway_requests_total[1m])) > 0.01)
+          and sum by (platform) (rate(tm_gateway_requests_total[1m])) >= 1
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.platform }} error rate above 1%"
+          description: "{{ $value | humanizePercentage }} of requests to {{ $labels.platform }} failed (5xx or no response) over 1m."
+
+      - alert: GatewayPoolHighLatencyP95
+        expr: |
+          histogram_quantile(0.95, sum by (platform, le) (rate(tm_gateway_response_seconds_bucket[5m]))) > 1
+          and sum by (platform) (rate(tm_gateway_response_seconds_count[5m])) >= 1
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.platform }} p95 response time above 1s"
+          description: "Estimated p95 (histogram) is {{ $value | humanizeDuration }} over 5m."
+
+      - alert: GatewayInstanceUnhealthy
+        expr: tm_instance_enabled == 1 and tm_instance_healthy == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Instance {{ $labels.instance }} ({{ $labels.platform }}) is not healthy"
+          description: "It has been removed from routing (MAINT) until its readiness probe recovers."
+
+      - alert: GatewayPoolDegraded
+        expr: tm_pool_status{status="DEGRADED"} == 1
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.platform }} pool is running with reduced capacity"
+
+      - alert: GatewayPoolDownWithTrafficAssigned
+        # The pool has a share in the policy but no routable instance: its share fails over to the other pool.
+        expr: |
+          tm_pool_routable_instances == 0
+          and on (platform) tm_traffic_policy_percent{source="configured"} > 0
+        for: 15s
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.platform }} has traffic assigned but no routable instance"
+          description: "HAProxy is failing its share over to the other pool. Check capacity there."
+
+  - name: traffic-migrations
+    rules:
+      - alert: MigrationSafetyViolation
+        # A stage failed its safety checks (error rate, p95, health, min requests) or failed to apply.
+        expr: (tm_migration_stages{status="FAILED"} - (tm_migration_stages{status="FAILED"} offset 10m)) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "A traffic-migration stage failed its safety checks"
+          description: "See the migration history in the console or GET /api/v1/migrations."
+
+      - alert: MigrationRolledBackOrFailed
+        expr: |
+          sum(tm_migrations{status=~"ROLLED_BACK|FAILED"})
+            - sum(tm_migrations{status=~"ROLLED_BACK|FAILED"} offset 10m) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "A traffic migration was rolled back or failed"
+
+      - alert: MigrationPausedTooLong
+        expr: tm_migration_active_status{status="PAUSED"} == 1
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "A traffic migration has been paused for 15m"
+          description: "Traffic is held at an intermediate split. Resume, roll back or cancel it."
+
+      - alert: EmergencyTrafficShift
+        expr: increase(tm_traffic_policy_changes_total{event="TRAFFIC_EMERGENCY_SHIFT", status="SUCCESS"}[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "An emergency traffic shift was applied"

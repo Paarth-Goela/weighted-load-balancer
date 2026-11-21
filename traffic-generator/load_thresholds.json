@@ -1,0 +1,56 @@
+{
+  "_comment": "Pass/fail thresholds for run_load_suite.py. Values are for the LOCAL SIMULATION on one machine; real OPDK/Hybrid limits must come from staging measurements. Override any value with --set scenario.key=value.",
+  "baseline_compare": {
+    "concurrency": 8, "duration_seconds": 20,
+    "max_error_rate_percent": 0.1, "max_p95_ms": 100,
+    "max_p95_ratio": 3.0, "min_throughput_ratio": 0.5
+  },
+  "sustained": {
+    "opdk_percent": 50, "concurrency": 8, "duration_seconds": 60,
+    "max_error_rate_percent": 0.1, "max_p95_ms": 100, "min_throughput_rps": 200,
+    "max_share_deviation_pp": 2.0, "max_metrics_disagreement_percent": 1.0
+  },
+  "ramp": {
+    "opdk_percent": 50, "start_concurrency": 1, "end_concurrency": 32, "duration_seconds": 40,
+    "max_error_rate_percent": 0.1, "max_p95_ms": 150
+  },
+  "spike": {
+    "opdk_percent": 50, "base_concurrency": 4, "peak_concurrency": 64, "phase_seconds": 10,
+    "max_error_rate_percent": 0.1, "max_spike_p95_ms": 300, "max_after_spike_p95_ms": 100
+  },
+  "instance_unready": {
+    "opdk_percent": 50, "concurrency": 6, "duration_seconds": 45, "fault_at": 8, "restore_at": 25,
+    "max_errors": 0, "max_removal_seconds": 10, "max_recovery_seconds": 15
+  },
+  "instance_crash": {
+    "opdk_percent": 50, "concurrency": 6, "duration_seconds": 60, "fault_at": 8, "restore_at": 30,
+    "max_error_rate_percent": 2.0, "max_failover_seconds": 10, "max_recovery_seconds": 20,
+    "max_unaffected_pool_errors": 0
+  },
+  "pool_outage": {
+    "opdk_percent": 50, "concurrency": 6, "duration_seconds": 60, "fault_at": 8, "restore_at": 30,
+    "max_error_rate_percent": 5.0, "max_failover_seconds": 10, "max_recovery_seconds": 25,
+    "max_unaffected_pool_errors": 0, "max_share_deviation_pp": 3.0
+  },
+  "connection_drop": {
+    "opdk_percent": 50, "concurrency": 6, "duration_seconds": 30, "fault_at": 5, "restore_at": 25,
+    "drop_rate": 0.1, "min_detected_error_rate_percent": 5.0, "max_detected_error_rate_percent": 15.0,
+    "max_unaffected_pool_errors": 0, "max_metrics_disagreement_percent": 2.0
+  },
+  "migration_error_rollback": {
+    "concurrency": 6, "interval_seconds": 15, "step_percent": 25, "min_requests": 50,
+    "error_rate": 0.3, "max_seconds_to_rollback": 25, "max_post_rollback_destination_requests": 0
+  },
+  "migration_latency_pause": {
+    "concurrency": 6, "interval_seconds": 15, "step_percent": 25, "min_requests": 20,
+    "latency_ms": 400, "max_p95_ms": 200, "max_seconds_to_pause": 25
+  },
+  "migration_complete": {
+    "concurrency": 6, "interval_seconds": 10, "step_percent": 25, "min_requests": 50,
+    "max_error_rate_percent": 0.1, "max_seconds_to_complete": 60, "min_final_destination_share_percent": 99.0
+  },
+  "haproxy_restart": {
+    "opdk_percent": 50, "concurrency": 6, "duration_seconds": 45, "fault_at": 8,
+    "max_outage_seconds": 10, "max_share_deviation_pp": 3.0
+  }
+}

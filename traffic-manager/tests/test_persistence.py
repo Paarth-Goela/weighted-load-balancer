@@ -72,12 +72,12 @@ def test_unhealthy_and_disabled_not_reenabled_after_api_restart(env):
 
 def test_migrations_are_idempotent(tmp_path):
     db = Database(tmp_path / "m.db")
-    assert db.migrate() == ["0001"]
+    assert db.migrate() == ["0001", "0002"]
     assert db.migrate() == []
-    assert db.schema_version() == "0001"
+    assert db.schema_version() == "0002"
     tables = {r["name"] for r in db.query("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"gateway_platforms", "gateway_pools", "gateway_instances", "traffic_policies",
-            "audit_log", "schema_migrations"} <= tables
+            "audit_log", "schema_migrations", "traffic_migrations", "traffic_migration_stages"} <= tables
     # DB-level constraints back up API validation
     db.execute("INSERT INTO gateway_platforms (name, platform_type, created_at, updated_at) VALUES ('a','APIGEE_OPDK','t','t')")
     for bad in ("INSERT INTO traffic_policies (name, opdk_weight, hybrid_weight, updated_by, updated_at) VALUES ('x',60,50,'t','t')",

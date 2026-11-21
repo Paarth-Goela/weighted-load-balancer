@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gateway Operations Console — Traffic Shift</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <!-- Login: the console holds no data or secrets; it calls the authenticated API. -->
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="card login-card">
+      <h1>Gateway Operations Console</h1>
+      <p class="muted">Apigee OPDK ↔ Hybrid traffic management</p>
+      <label for="token">Admin API token</label>
+      <input id="token" type="password" autocomplete="off" required minlength="16"
+             placeholder="TRAFFIC_API_TOKEN">
+      <p class="hint">Kept only in this browser tab (sessionStorage) and sent as a Bearer token to this server.</p>
+      <p id="login-error" class="error" role="alert"></p>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <strong>Gateway Operations Console</strong>
+        <span class="muted">Traffic Shift</span>
+      </div>
+      <div class="topbar-right">
+        <span id="conn" class="conn" aria-live="polite"></span>
+        <button id="logout" type="button" class="ghost">Sign out</button>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Traffic Shift">
+      <button role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
+      <button role="tab" data-tab="manual">Manual shift</button>
+      <button role="tab" data-tab="gradual">Gradual shift</button>
+      <button role="tab" data-tab="scheduled">Scheduled shift</button>
+      <button role="tab" data-tab="emergency" class="tab-danger">Emergency</button>
+      <button role="tab" data-tab="history">History</button>
+    </nav>
+
+    <main>
+      <p id="banner" class="banner" role="status" hidden></p>
+
+      <!-- ============================ DASHBOARD ============================ -->
+      <section id="tab-dashboard" class="tab" role="tabpanel">
+        <div class="tiles" id="tiles"></div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head">
+              <h2>Gateway health</h2>
+            </div>
+            <div id="gateway-health"></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h2>Traffic &amp; errors <span class="muted" id="metrics-window"></span></h2>
+            </div>
+            <div id="pool-metrics"></div>
+          </div>
+        </div>
+        <div class="card" id="active-card">
+          <div class="card-head"><h2>Active migration</h2><div id="active-controls" class="controls"></div></div>
+          <div id="active-migration"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Traffic allocation over time</h2>
+            <button type="button" class="ghost small" data-table-toggle="chart-allocation">Table view</button></div>
+          <div id="chart-allocation" class="chart"></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h2>Error rate by pool</h2>
+              <button type="button" class="ghost small" data-table-toggle="chart-errors">Table view</button></div>
+            <div id="chart-errors" class="chart"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>p95 latency by pool</h2>
+              <button type="button" class="ghost small" data-table-toggle="chart-latency">Table view</button></div>
+            <div id="chart-latency" class="chart"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ MANUAL ============================ -->
+      <section id="tab-manual" class="tab" role="tabpanel" hidden>
+        <form id="manual-form" class="card form">
+          <h2>Manual shift</h2>
+          <p class="muted">Applies a traffic policy immediately through the verified policy API. Pauses any
+            active migration.</p>
+          <div class="split-inputs">
+            <label>Apigee OPDK %<input name="opdk" type="number" min="0" max="100" step="1" required></label>
+            <label>Apigee Hybrid %<input name="hybrid" type="number" min="0" max="100" step="1" required></label>
+          </div>
+          <div class="allocation-bar" id="manual-bar" aria-hidden="true"></div>
+          <p id="manual-total" class="hint"></p>
+          <label>Reason<input name="reason" maxlength="500" placeholder="e.g. canary week 1"></label>
+          <p class="error" id="manual-error" role="alert"></p>
+          <button class="primary" type="submit">Apply policy</button>
+        </form>
+      </section>
+
+      <!-- ============================ GRADUAL ============================ -->
+      <section id="tab-gradual" class="tab" role="tabpanel" hidden>
+        <form id="gradual-form" class="card form">
+          <h2>Gradual shift</h2>
+          <fieldset>
+            <legend>Direction &amp; allocation</legend>
+            <div class="row">
+              <label>Source pool<select name="source"></select></label>
+              <label>Destination pool<select name="destination"></select></label>
+            </div>
+            <div class="row">
+              <label>Starting destination %<input name="start" type="number" min="0" max="100"
+                     placeholder="current"></label>
+              <label>Target destination %<input name="target" type="number" min="0" max="100" value="100"
+                     required></label>
+              <label>Increment (pp)<input name="step" type="number" min="1" max="100" value="10" required></label>
+              <label>Interval (s)<input name="interval" type="number" min="1" value="300" required></label>
+            </div>
+          </fieldset>
+          <fieldset id="gradual-safety"></fieldset>
+          <label>Reason<input name="reason" maxlength="500"></label>
+          <p class="error" id="gradual-error" role="alert"></p>
+          <div class="controls">
+            <button type="button" id="gradual-preview" class="ghost">Preview stages</button>
+            <button type="submit" class="primary">Start migration</button>
+          </div>
+          <div id="gradual-plan"></div>
+        </form>
+      </section>
+
+      <!-- ============================ SCHEDULED ============================ -->
+      <section id="tab-scheduled" class="tab" role="tabpanel" hidden>
+        <form id="scheduled-form" class="card form">
+          <h2>Scheduled shift</h2>
+          <p class="muted">Each stage is applied at its time after the same safety checks. A stage missed while the
+            service was down is never applied late.</p>
+          <div class="row">
+            <label>Source pool<select name="source"></select></label>
+            <label>Destination pool<select name="destination"></select></label>
+            <label>Final observation (s)<input name="final" type="number" min="1" value="300" required></label>
+          </div>
+          <table class="table" id="schedule-rows">
+            <thead><tr><th>When (local time)</th><th>OPDK %</th><th>Hybrid %</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <button type="button" id="add-stage" class="ghost small">Add stage</button>
+          <fieldset id="scheduled-safety"></fieldset>
+          <label>Reason<input name="reason" maxlength="500"></label>
+          <p class="error" id="scheduled-error" role="alert"></p>
+          <button type="submit" class="primary">Create schedule</button>
+        </form>
+        <div class="card">
+          <div class="card-head"><h2>Schedule</h2></div>
+          <div id="schedule-view"></div>
+        </div>
+      </section>
+
+      <!-- ============================ EMERGENCY ============================ -->
+      <section id="tab-emergency" class="tab" role="tabpanel" hidden>
+        <form id="emergency-form" class="card form danger-card">
+          <h2>Emergency traffic reallocation</h2>
+          <p>Moves traffic immediately and <strong>cancels any active migration</strong>. Every pool that
+            receives traffic must have a healthy, routable instance. The action is audited.</p>
+          <div class="controls">
+            <button type="button" class="ghost" data-emergency="100">All traffic → Apigee OPDK</button>
+            <button type="button" class="ghost" data-emergency="0">All traffic → Apigee Hybrid</button>
+          </div>
+          <div class="split-inputs">
+            <label>Apigee OPDK %<input name="opdk" type="number" min="0" max="100" value="100" required></label>
+            <label>Apigee Hybrid %<input name="hybrid" type="number" min="0" max="100" value="0" required></label>
+          </div>
+          <div id="emergency-availability"></div>
+          <label>Reason (required)<input name="reason" required minlength="3" maxlength="500"></label>
+          <p class="error" id="emergency-error" role="alert"></p>
+          <button type="submit" class="danger">Review emergency shift…</button>
+        </form>
+        <dialog id="emergency-dialog">
+          <form method="dialog" id="emergency-confirm-form">
+            <h2>Confirm emergency shift</h2>
+            <p id="emergency-summary"></p>
+            <label>Type <code>EMERGENCY SHIFT</code> to confirm
+              <input name="confirm" autocomplete="off" required></label>
+            <div class="controls">
+              <button value="cancel" type="button" class="ghost" id="emergency-cancel">Cancel</button>
+              <button value="confirm" type="submit" class="danger" id="emergency-go">Apply now</button>
+            </div>
+          </form>
+        </dialog>
+      </section>
+
+      <!-- ============================ HISTORY ============================ -->
+      <section id="tab-history" class="tab" role="tabpanel" hidden>
+        <div class="card">
+          <div class="card-head"><h2>Migrations</h2></div>
+          <div id="migration-list"></div>
+        </div>
+        <div class="card" id="migration-detail-card" hidden>
+          <div class="card-head"><h2 id="migration-detail-title"></h2>
+            <button type="button" class="ghost small" data-table-toggle="chart-plan">Table view</button></div>
+          <div id="chart-plan" class="chart"></div>
+          <div id="migration-stages"></div>
+          <h3>Audit trail</h3>
+          <div id="migration-audit"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Traffic policy changes</h2></div>
+          <div id="traffic-history"></div>
+        </div>
+      </section>
+    </main>
+    <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  </div>
+</body>
+</html>

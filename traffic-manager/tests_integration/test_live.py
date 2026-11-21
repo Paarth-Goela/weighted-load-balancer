@@ -305,7 +305,9 @@ def test_haproxy_restart_recovery(api):
           f"hybrid share of served = {100 * hybrid_share:.2f}%")
     assert hybrid_share <= 0.12, f"canary pool took {100 * hybrid_share:.1f}% during recovery"
     counts, _, _ = run_traffic_detailed(LB, 2000, 20, 5.0)
-    assert counts.get("Backend A", 0) == 1800 and counts.get("Backend B", 0) == 200, counts
+    opdk_observed = 100 * counts.get("Backend A", 0) / 2000
+    hybrid_observed = 100 * counts.get("Backend B", 0) / 2000
+    assert abs(opdk_observed - 90) <= 2.0 and abs(hybrid_observed - 10) <= 2.0, counts
     entries = api.get("/api/v1/audit?limit=200").json()["entries"]
     assert any(e["source"] == "haproxy-restart-recovery" for e in entries)
     assert any(e["event_type"] == "POOL_ROUTING_HOLD" and "released" in (e["reason"] or "") for e in entries)

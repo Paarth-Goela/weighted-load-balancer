@@ -28,12 +28,22 @@ Response example (also served on the readiness path `/healthz`):
 
 **Fault injection (simulation only).** The readiness path returns 503 while
 normal paths keep returning 200. This shows that an open TCP port is not
-readiness.
+readiness. A second switch makes normal API calls fail or slow down *while
+readiness stays green*. That shows a passing health check is not proof that
+the gateway serves API traffic correctly, and it is how the Traffic Shift
+safety gates are tested.
 
 ```bash
-curl -s -X POST localhost:8003/__sim/health -d '{"ready": false}'   # opdk-router-2 not ready
+# opdk-router-2 not ready
+curl -s -X POST localhost:8003/__sim/health -d '{"ready": false}'
 curl -s -X POST localhost:8003/__sim/health -d '{"ready": true}'
+# hybrid-ingress-1
+curl -s -X POST localhost:8002/__sim/faults -d '{"error_rate": 0.3, "latency_ms": 250}'
+curl -s -X POST localhost:8002/__sim/faults -d '{"error_rate": 0, "latency_ms": 0}'
 ```
+
+**Operations Console:** http://localhost:9000/console/ (sign in with the token
+from `.env`). See [traffic-shift.md](traffic-shift.md).
 
 ## Run
 
@@ -41,7 +51,8 @@ curl -s -X POST localhost:8003/__sim/health -d '{"ready": true}'
 cd load-balancer
 cp .env.example .env && sed -i '' "s/^TRAFFIC_API_TOKEN=.*/TRAFFIC_API_TOKEN=$(openssl rand -hex 32)/" .env
 docker compose up -d --build
-docker compose ps                       # traffic-manager becomes (healthy)
+# traffic-manager becomes (healthy)
+docker compose ps
 ```
 
 On first start, the traffic-manager imports `config/bootstrap.simulation.json`
@@ -76,7 +87,7 @@ To start over from scratch: `docker compose down -v` (deletes the SQLite volume)
 
 ## Tests
 
-### Unit tests: 89 tests, Python 3.12, in Docker, no stack needed
+### Unit tests: 150 tests, Python 3.12, in Docker, no stack needed
 
 ```bash
 docker build -f traffic-manager/Dockerfile --target test -t traffic-manager-test .
@@ -107,11 +118,20 @@ These restart and stop containers. Use only a local stack. Run every command
 **from the `load-balancer/` repository folder**; the paths are relative to it.
 
 ```bash
-cd "/path/to/load balancer/load-balancer"   # quote it: the parent folder name has a space
+# quote it: the parent folder name has a space
+cd "/path/to/load balancer/load-balancer"
 python3 -m venv .venv && .venv/bin/pip install pytest httpx
 .venv/bin/pytest traffic-manager/tests_integration -m integration -s -v
 INTEGRATION_REQUESTS=20000 .venv/bin/pytest traffic-manager/tests_integration -m integration -s
+# Traffic Shift only
+.venv/bin/pytest traffic-manager/tests_integration/test_live_migrations.py -m integration -s -v
 ```
+
+`test_live_migrations.py` (8 tests) runs background load through `:8080` and
+covers: the console being served, a gradual migration to completion,
+error-rate and latency violations injected while health stays green, duplicate
+starts and manual-change pausing, a management-service restart
+mid-migration, a scheduled shift, and an emergency shift.
 
 Each distribution test sends 10,000 requests through `:8080`, each on a **new
 TCP connection** (`Connection: close`), so every request is an independent
@@ -147,6 +167,17 @@ The live suite also covers:
 - restarting the management API (state restored from SQLite);
 - restarting HAProxy under load (policy and instances restored, and the canary never exceeded its share);
 - the Runtime API becoming unreachable (503, nothing persisted, recovery after restart).
+
+### Load and failure suite, Prometheus metrics and alerts
+
+See [observability-and-load-testing.md](observability-and-load-testing.md).
+
+```bash
+# 12 scenarios, ~12 min, stack must be up
+python3 traffic-generator/run_load_suite.py
+# load-generator unit tests, no stack needed
+.venv/bin/pytest traffic-generator/test_loadgen.py -q
+```
 
 ### Milestone 2 suite (still passes)
 

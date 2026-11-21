@@ -77,6 +77,9 @@ services:
       # traffic-manager monitor does the per-instance readiness checks).
       OPDK_NATIVE_CHECK_PATH: ${OPDK_NATIVE_CHECK_PATH:-/healthz}
       HYBRID_NATIVE_CHECK_PATH: ${HYBRID_NATIVE_CHECK_PATH:-/healthz}
+      # X-Gateway-Pool / X-Gateway-Instance response headers for the load-test
+      # suite. Local simulation only: set to 0 anywhere real clients connect.
+      EXPOSE_ROUTING_HEADERS: ${EXPOSE_ROUTING_HEADERS:-1}
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - haproxy-runtime:/var/lib/haproxy          # holds admin.sock (mode 600)
@@ -111,6 +114,7 @@ services:
       HAPROXY_CA_FILE: ${HAPROXY_CA_FILE:-@system-ca}
       METRICS_SOCKET: /run/haproxy-runtime/metrics.sock
       METRICS_RETENTION_SECONDS: ${METRICS_RETENTION_SECONDS:-900}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}           # optional read-only token for GET /metrics (Prometheus)
     volumes:
       - haproxy-runtime:/run/haproxy-runtime      # Runtime API socket + metrics socket (created here)
       - tm-data:/app/data                         # SQLite database
@@ -127,6 +131,37 @@ services:
     networks:
       - load-balancer                             # needed to probe gateway instances
 
+  # ------------------------------------------------ Observability (opt-in)
+  # docker compose --profile observability up -d
+  # Prometheus scrapes traffic-manager /metrics with the read-only METRICS_TOKEN
+  # (Compose secret from the environment / .env) and evaluates alerts.yml.
+  # UI: http://127.0.0.1:9090 (localhost only). Free, open-source image.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus               # metric history survives restarts
+    secrets:
+      - metrics_token
+    depends_on:
+      - traffic-manager
+    restart: unless-stopped
+    networks:
+      - load-balancer
+
+secrets:
+  metrics_token:
+    environment: METRICS_TOKEN
+
 networks:
   load-balancer:
     driver: bridge
@@ -134,3 +169,4 @@ networks:
 volumes:
   haproxy-runtime:
   tm-data:
+  prometheus-data:

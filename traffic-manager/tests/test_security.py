@@ -7,6 +7,7 @@ from app.settings import Settings, SettingsError
 from conftest import AUTH, TOKEN, seed
 
 ENDPOINTS = [
+    ("GET", "/metrics", None),
     ("GET", "/api/v1/gateways", None), ("POST", "/api/v1/gateways", {"name": "x", "platform_type": "APIGEE_OPDK"}),
     ("GET", "/api/v1/gateways/1", None), ("GET", "/api/v1/pools", None),
     ("POST", "/api/v1/pools", {"name": "p", "platform_id": 1}), ("GET", "/api/v1/pools/1", None),
@@ -18,6 +19,15 @@ ENDPOINTS = [
     ("GET", "/api/v1/traffic/policies", None), ("GET", "/api/v1/health", None),
     ("GET", "/api/v1/health/gateways", None), ("GET", "/api/v1/health/instances", None),
     ("GET", "/api/v1/audit", None),
+    ("GET", "/api/v1/traffic-shift/overview", None), ("GET", "/api/v1/metrics/traffic", None),
+    ("GET", "/api/v1/metrics/timeseries", None), ("GET", "/api/v1/migrations", None),
+    ("GET", "/api/v1/migrations/active", None),
+    ("POST", "/api/v1/migrations", {"target_destination_percent": 100}),
+    ("POST", "/api/v1/migrations/preview", {"target_destination_percent": 100}),
+    ("POST", "/api/v1/migrations/scheduled", {"stages": []}),
+    ("POST", "/api/v1/migrations/1/pause", None), ("POST", "/api/v1/migrations/1/rollback", None),
+    ("DELETE", "/api/v1/migrations/1/stages/1", None),
+    ("POST", "/api/v1/traffic/emergency", {"opdk_weight": 0, "hybrid_weight": 100, "reason": "x", "confirm": "EMERGENCY SHIFT"}),
 ]
 
 
@@ -34,6 +44,7 @@ def test_16_unauthorized_requests(env, client, method, path, body):
     after_cmds = env.fake.commands[before[1]:]
     assert env.fake.policy() == before[0]
     assert not [c for c in after_cmds if not c.startswith("show")]   # nothing mutated
+    assert client.get("/api/v1/migrations", headers=AUTH).json() == []
 
 
 def test_unauthenticated_invalid_body_gets_401_not_422(client):

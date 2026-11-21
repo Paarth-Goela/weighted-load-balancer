@@ -209,6 +209,21 @@ load at 90:10, Hybrid received 9.98% of served requests.
   rotation or expiry); `X-Actor` is recorded but unverified; no TLS on :9000.
   Keep it on localhost or put it behind a TLS proxy.
 
+## 7a. Traffic Shift Management and metrics
+
+The Operations Console (`/console`) and the migration engine (gradual,
+scheduled and emergency shifts with safety gates, pause/resume/approve/
+cancel/rollback, restart-safe persistence) are described in
+[traffic-shift.md](traffic-shift.md). Architecturally:
+
+* The migration engine is another client of `TrafficManager.apply()`. It
+  never talks to HAProxy directly, and nor does the console.
+* HAProxy's pool frontends stream one log line per request to a Unix datagram
+  socket (`metrics.sock`) created by the traffic manager on the shared runtime
+  volume. Because the manager creates that socket, its mount of the volume is
+  now **read-write** (it was read-only). It already holds admin rights on the
+  Runtime API, so this adds no meaningful privilege.
+
 ## 8. Known limitations
 
 1. **HAProxy restart outage window.** Instances are dynamic servers, which

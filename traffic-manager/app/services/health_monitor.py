@@ -137,10 +137,17 @@ class HealthMonitor:
         self.clock = clock
         self.max_workers = max_workers
         self.last_cycle: dict = {}
+        # Cumulative counters for the Prometheus exporter.
+        self.cycles_total = 0
+        self.probes_total: dict[str, int] = {"success": 0, "failure": 0}
+        self.transitions_total: dict[str, int] = {}          # to-state -> n
+        self.last_cycle_seconds: Optional[float] = None
+        self.last_cycle_end: Optional[float] = None           # unix time
 
     def run_cycle(self) -> dict:
         """One probe pass + state update + reconciliation. Safe to call anytime."""
         started = utcnow()
+        t0 = time.monotonic()
         instances = self.gateways.all_instance_rows()
         results: dict[int, ProbeResult] = {}
         if instances:
@@ -154,6 +161,13 @@ class HealthMonitor:
                 if t:
                     transitions.append(t)
         reconcile = self.reconciler.reconcile()
+        for res in results.values():
+            self.probes_total["success" if res.ok else "failure"] += 1
+        for t in transitions:
+            self.transitions_total[t["to"]] = self.transitions_total.get(t["to"], 0) + 1
+        self.cycles_total += 1
+        self.last_cycle_seconds = time.monotonic() - t0
+        self.last_cycle_end = time.time()
         self.last_cycle = {"started_at": started, "finished_at": utcnow(), "probed": len(instances),
                            "transitions": transitions, "reconcile": reconcile}
         return self.last_cycle

@@ -1066,3 +1066,102 @@ orchestrated migrations with automatic rollback triggers.
 | **Fresh probe** | A successful health probe after a server was (re)added, required before READY |
 | **Pool hold** | Temporarily keeping both pool links out of rotation after an HAProxy restart so they return together |
 | **abns@** | Abstract-namespace Unix socket used for the in-process hop between HAProxy tiers |
+
+---
+
+## 16. Addendum — Traffic Shift Management and the Operations Console
+
+Added after Milestone 3. Full details: [traffic-shift.md](traffic-shift.md).
+
+### 16.1 What was added
+
+```mermaid
+flowchart LR
+    B["Operator browser"] --> C["/console (static)"]
+    C -- "Bearer token, /api/v1/*" --> R["api/migrations.py"]
+    R --> M["MigrationManager"]
+    S["MigrationScheduler (1 s tick)"] --> M
+    M -- "apply()" --> T["TrafficManager"] --> H["HAProxy Runtime API"]
+    H -. "per-request log lines<br/>metrics.sock (Unix DGRAM)" .-> MC["MetricsCollector"]
+    M --> MC
+    M --> DB[("SQLite 0002:<br/>traffic_migrations,<br/>traffic_migration_stages")]
+```
+
+| File | What it does |
+|---|---|
+| `traffic-manager/app/console/index.html`, `app.js`, `styles.css` | Gateway Operations Console. Traffic Shift module with Dashboard, Manual, Gradual, Scheduled, Emergency and History tabs. Static, no build step and no dependencies; all data from the API; strict CSP; hand-built SVG charts with tooltip, legend, direct labels and table view. |
+| `app/services/migration_manager.py` | Migration engine: planning, pre-stage checks, observation windows, threshold evaluation, auto-rollback, pause/resume/approve/cancel/rollback, scheduled stages, emergency shift, restart recovery. |
+| `app/services/migration_scheduler.py` | Background thread that calls `tick()` every second. |
+| `app/services/metrics_collector.py` | Receives HAProxy's per-request stream. Computes per-pool request count, error rate, p95 and avg; time series. |
+| `app/models/migration.py` | Schemas: gradual/scheduled create, safety thresholds, controls, emergency shift (`confirm: "EMERGENCY SHIFT"`), migration/stage outputs. |
+| `app/api/migrations.py` | Migration, emergency, metrics and dashboard-overview endpoints. |
+| `app/database/migrations/0002_traffic_migrations.sql` | Persistent migration and stage state; `UNIQUE active_slot` (one active migration). |
+| `haproxy/haproxy.cfg` | Pool frontends add `log /var/lib/haproxy/metrics.sock` with format `M %b %s %ST %Tr %Tt`. |
+| `backend-a/app.py`, `backend-b/app.py` | New `/__sim/faults` (error rate, latency) that leaves readiness green. |
+| `tests/test_migrations.py`, `tests/test_console_metrics.py` | 39 unit tests (fake clock shared by the engine and metrics). |
+| `tests_integration/test_live_migrations.py` | 8 live tests with real load and injected faults. |
+
+### 16.2 Additional decisions
+
+| # | Decision | Alternatives | Why | Cost |
+|---|---|---|---|---|
+| D29 | **Metrics from HAProxy's per-request log stream** over a Unix datagram socket | `show stat` averages; Prometheus exporter; sampling in the probe | Real traffic, per pool, true p95; no network listener; fire-and-forget, so the data plane is never blocked | In-memory windows, lost on restart; the manager's volume mount became read-write |
+| D30 | **The migration engine only calls `TrafficManager.apply()`** | Its own HAProxy writes | One verified, versioned, audited path for every traffic change | — |
+| D31 | **Gate stages on observed error rate and p95, not just health** | Health-only gating | A healthy gateway can still fail API calls (demonstrated live: 28–32% errors with green readiness) | Needs enough traffic: `min_requests` |
+| D32 | **Insufficient traffic → PAUSE, not pass** | Advance anyway | No evidence is not good evidence | Low-traffic windows need operator action |
+| D33 | **Restart → PAUSED; resume re-verifies policy and health; missed schedules never run late** | Auto-resume | Observation evidence was lost; the world may have changed | Operator action after restarts |
+| D34 | **Manual change pauses, emergency cancels** an active migration | Ignore; fight the operator | Humans always win; the engine never overwrites an out-of-band change | — |
+| D35 | **One active migration**, enforced in the DB too | Lock only | Survives concurrent requests and future multi-process deployment | — |
+| D36 | **Vanilla JS console served by FastAPI** | React/Vite SPA | Zero build tooling and dependencies, same origin (no CORS), strict CSP possible | Hand-built charts and DOM code |
+
+### 16.3 Validation added
+
+* **Unit:** 139/139 overall (39 new plus 13 new auth cases), covering manual,
+  gradual, pause/resume, cancel, scheduled (including cancellation and missed
+  stages), destination failure (before and during a stage), error-rate and
+  latency violations, insufficient traffic, auto and manual rollback, approval,
+  duplicate prevention (8 concurrent starts → 1 created), restart mid-migration,
+  emergency shift, audit history, and a GUI-to-API contract test (every endpoint
+  `app.js` calls exists and is authenticated; no `innerHTML`; a single `fetch`
+  via the API client).
+* **Live:** 8/8 Traffic Shift tests in two consecutive runs (one earlier run had
+  a single unexplained timeout that has not reproduced). All 16 earlier live
+  tests and the Milestone 2 suite still pass.
+* **Real browser:** headless Chrome over the DevTools protocol drove the console
+  end to end (sign-in, preview, start, duplicate start blocked in the UI,
+  live dashboard, tooltip, completion, history, emergency confirmation, dark
+  mode) with no JS exceptions or CSP violations. Screenshots were reviewed; four
+  visual defects were found and fixed.
+
+### 16.4 Evaluation update
+
+Observability rises from ★★★ to ★★★★: real per-pool error rate and p95, a live
+dashboard, and per-stage evidence persisted with each migration. It is still
+short of long-term metrics storage and alerting (Milestone 6). Migration
+orchestration (roadmap M5) is now largely delivered. **Security note:** §10's
+"read-only socket mount" no longer holds; the traffic manager now mounts the
+runtime volume read-write so it can create `metrics.sock`.
+
+
+## 17. Addendum — Prometheus metrics and the load/failure suite
+
+Full details: [observability-and-load-testing.md](observability-and-load-testing.md).
+
+| New / changed file | Purpose |
+|---|---|
+| `traffic-manager/app/services/prometheus.py` | Hand-written Prometheus exposition: data plane, policy, health, HAProxy, control loop, migrations |
+| `traffic-manager/app/api/observability.py` | `GET /metrics` (admin token or read-only `METRICS_TOKEN`) |
+| `traffic-manager/app/services/metrics_collector.py` | Adds cumulative per-instance request/error counters and a latency histogram |
+| `health_monitor.py`, `reconciler.py`, `migration_manager.py`, `main.py` | Counters for cycles, probes, transitions, restarts, reconcile errors, tick errors, loop failures |
+| `traffic-manager/tests/test_prometheus.py` | 11 tests: auth, format, values tracking state |
+| `backend-a/app.py`, `backend-b/app.py` | New faults: `latency_jitter_ms`, `drop_rate` (TCP reset) |
+| `haproxy/haproxy.cfg`, `docker-compose.yml` | `X-Gateway-Pool` / `X-Gateway-Instance` response headers behind `EXPOSE_ROUTING_HEADERS`; opt-in Prometheus service |
+| `observability/prometheus/` | Scrape config, 15 alert rules, promtool rule tests |
+| `traffic-generator/loadgen.py`, `harness.py`, `run_load_suite.py`, `load_thresholds.json`, `test_loadgen.py` | Load profiles, fault injection, 12 scenarios, thresholds, JSON/CSV/JUnit reports |
+
+Decisions:
+
+- **D37 — No Prometheus client library.** The exposition format is small, and the service uses no other library features.
+- **D38 — A separate read-only `METRICS_TOKEN`.** Prometheus never holds admin rights.
+- **D39 — Attribution through response headers, not response bodies.** HAProxy-generated errors have no simulator body, so only headers can attribute them to a pool. The headers expose topology, so they are behind an environment flag that is on only in the local simulation.
+- **D40 — Suite thresholds in a JSON file with `--set` overrides.** The thresholds are numbers for this local stack and must be re-baselined on staging.

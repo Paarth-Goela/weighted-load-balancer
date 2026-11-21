@@ -49,6 +49,7 @@ def _result(out: dict, message: str) -> dict:
 def update_config(body: TrafficPolicyUpdate, request: Request):
     out = request.app.state.traffic.apply(body.opdk_weight, body.hybrid_weight, updated_by=actor(request),
                                           name=body.name, reason=body.reason)
+    request.app.state.migrations.note_external_policy_change(actor(request))   # stop any migration
     p = out["previous"]
     return _result(out, f"OPDK/Hybrid {p['opdk_weight']}:{p['hybrid_weight']} -> "
                         f"{body.opdk_weight}:{body.hybrid_weight} applied without restart and verified "
@@ -63,6 +64,7 @@ def update_config(body: TrafficPolicyUpdate, request: Request):
 def rollback(request: Request, body: Optional[RollbackRequest] = Body(None)):
     body = body or RollbackRequest()
     out = request.app.state.traffic.rollback(body.to_version, updated_by=actor(request), reason=body.reason)
+    request.app.state.migrations.note_external_policy_change(actor(request))
     p = out["previous"]
     pol = out["policy"]
     return _result(out, f"rolled back: {p['opdk_weight']}:{p['hybrid_weight']} -> "

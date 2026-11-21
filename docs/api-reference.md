@@ -114,6 +114,35 @@ curl -s -X PUT localhost:9000/api/v1/traffic/config -H "$H" -H 'Content-Type: ap
  "verified":true}
 ```
 
+## Traffic Shift (migrations, emergency, metrics)
+
+See [traffic-shift.md](traffic-shift.md) for semantics and safety rules.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/v1/migrations/preview` | Computes gradual stages without starting anything |
+| POST | `/api/v1/migrations` | Start a gradual migration (201). 409 if one is already active. |
+| POST | `/api/v1/migrations/scheduled` | Create a scheduled migration: `stages[] {at (tz required), opdk_weight, hybrid_weight}` |
+| GET | `/api/v1/migrations?limit=` | Recent migrations (newest first), with stages |
+| GET | `/api/v1/migrations/active` | The active migration, or `null` |
+| GET | `/api/v1/migrations/{id}` | One migration with stages, safety checks and metrics |
+| GET | `/api/v1/migrations/{id}/history` | Its audit trail |
+| POST | `/api/v1/migrations/{id}/pause` \| `resume` \| `approve` \| `cancel` | Body optional: `{"reason"}`. `resume` re-verifies the HAProxy policy and destination health (409 if not). |
+| POST | `/api/v1/migrations/{id}/rollback` | `{"to": "last_good" \| "initial", "reason"?}` |
+| DELETE | `/api/v1/migrations/{id}/stages/{seq}` | Cancel a PENDING stage before it runs |
+| POST | `/api/v1/traffic/emergency` | `{"opdk_weight","hybrid_weight","reason","confirm":"EMERGENCY SHIFT"}`. Cancels any active migration; returns `cancelled_migration`. |
+| GET | `/api/v1/metrics/traffic?window_seconds=60` | Per-pool requests, errors, error rate, p95, avg, rps, per-server counts, collector status |
+| GET | `/api/v1/metrics/timeseries?seconds=600&bucket_seconds=10` | Per-pool buckets for charts |
+| GET | `/api/v1/traffic-shift/overview` | Everything the dashboard shows, in one call |
+
+Gradual body: `source`, `destination`, `start_destination_percent?`,
+`target_destination_percent`, `step_percent`, `interval_seconds`, `min_requests`,
+`max_error_rate_percent`, `max_p95_ms`, `min_healthy_instances`, `auto_rollback`,
+`require_approval`, `name?`, `reason?`.
+
+Console: `GET /console/` (static, public; all data comes from the endpoints
+above with the operator's token). `GET /` redirects to it.
+
 ## Health and audit
 
 | Method | Path | Auth | Notes |
@@ -123,8 +152,10 @@ curl -s -X PUT localhost:9000/api/v1/traffic/config -H "$H" -H 'Content-Type: ap
 | GET | `/api/v1/health/gateways` | yes | Per platform: pool health summary, status, configured vs effective %, HAProxy pool check |
 | GET | `/api/v1/health/instances?transitions=5` | yes | Per instance: health, counters, last error, runtime state, `awaiting_fresh_probe`, recent transitions |
 | GET | `/api/v1/audit?event_type=&entity_type=&entity_id=&limit=&offset=` | yes | All audit events |
+| GET | `/metrics` | admin token **or** `METRICS_TOKEN` | Prometheus text format 0.0.4 (see [observability-and-load-testing.md](observability-and-load-testing.md)). `METRICS_TOKEN` is read-only: it is accepted here and nowhere else |
 
-Audit event types: `GATEWAY_REGISTERED`, `POOL_CREATED`, `INSTANCE_REGISTERED`,
+Audit event types also include `TRAFFIC_EMERGENCY_SHIFT` and `MIGRATION_*`
+(see traffic-shift.md). Earlier types: `GATEWAY_REGISTERED`, `POOL_CREATED`, `INSTANCE_REGISTERED`,
 `INSTANCE_UPDATED`, `INSTANCE_DEREGISTERED`, `INSTANCE_RUNTIME_SYNC`,
 `HEALTH_TRANSITION`, `TRAFFIC_POLICY_CHANGE`, `TRAFFIC_ROLLBACK`,
 `TRAFFIC_POLICY_RESTORE`, `POOL_ROUTING_HOLD`, `BOOTSTRAP`.
@@ -149,3 +180,9 @@ Statuses: `SUCCESS`, `FAILED`, `REJECTED`, `INFO`.
 | `LOCK_TIMEOUT_SECONDS` | 10 | |
 | `POOL_RELEASE_SETTLE_SECONDS` / `POOL_RELEASE_TIMEOUT_SECONDS` | 1.5 / 20 | Pool hold after an HAProxy restart |
 | `OPDK_NATIVE_CHECK_PATH` / `HYBRID_NATIVE_CHECK_PATH` | `/healthz` | HAProxy's native per-pool check |
+| `METRICS_SOCKET` | compose: `/run/haproxy-runtime/metrics.sock` | HAProxy per-request log stream (unset = metrics disabled) |
+| `METRICS_RETENTION_SECONDS` | 900 | In-memory metric retention |
+| `MIGRATION_TICK_SECONDS` | 1 | Migration engine tick |
+| `SCHEDULE_GRACE_SECONDS` | 60 | A scheduled stage later than this is not run; the migration pauses |
+| `METRICS_TOKEN` | — | Optional read-only bearer token for `GET /metrics` only (≥16 chars, must differ from `TRAFFIC_API_TOKEN`) |
+| `EXPOSE_ROUTING_HEADERS` (HAProxy) | compose: `1` | Adds `X-Gateway-Pool` / `X-Gateway-Instance` to responses for the load suite. Local simulation only; set `0` wherever real clients connect |
