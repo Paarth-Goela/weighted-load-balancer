@@ -1,0 +1,37 @@
+services:
+  backend-a:
+    build: ./backend-a
+    container_name: backend-a
+    expose:
+      - "8000"
+    ports:
+      - "8001:8000"
+    networks:
+      - load-balancer
+
+  backend-b:
+    build: ./backend-b
+    container_name: backend-b
+    expose:
+      - "8000"
+    ports:
+      - "8002:8000"
+    networks:
+      - load-balancer
+
+  haproxy:
+    image: haproxy:3.0-alpine
+    container_name: haproxy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - backend-a
+      - backend-b
+    networks:
+      - load-balancer
+
+networks:
+  load-balancer:
+    driver: bridge
